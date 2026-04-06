@@ -60,23 +60,19 @@
           </div>
         </div>
       </section>
-
       <section class="card">
-        <h2 style="font-size:16px; margin:0 0 12px 0;">System Logic</h2>
+        <h2 style="font-size:16px; margin:0 0 12px 0;">Generate Summary</h2>
         <div style="font-size:13px; color:var(--muted); line-height:1.6;">
-          <p style="margin:0 0 8px 0;"><strong style="color:var(--text);">Sitting:</strong> Triggered by FSR sensor
-            threshold.</p>
-          <p style="margin:0 0 8px 0;"><strong style="color:var(--text);">Room:</strong> Triggered by PIR motion
-            toggle.</p>
-          <p style="margin-top:8px; color:var(--ok);">✅ Data saved to browser storage.</p>
+          <p style="margin:0 0 8px 0;">Summary is generated according to the sitting history by Gen AI.</p>
+          <p style="margin:0 0 8px 0;">Note: It is only a reference for helping your dicision making, not acutal
+            actions.</p>
         </div>
 
         <div style="margin-top:20px;">
-          <h3 style="font-size:13px; color:var(--muted); margin:0 0 8px 0;">Live Debug Log</h3>
-          <div id="debugLog" class="log-box">Waiting for MQTT data...</div>
+          <h3 style="font-size:13px; color:var(--muted); margin:0 0 8px 0;">Summary</h3>
+          <div id="debugLog" class="log-box">Waiting for AI...</div>
         </div>
       </section>
-
     </div>
 
     <section class="card" style="margin-top:16px;">
@@ -107,6 +103,7 @@
       </div>
     </section>
 
+
   </main>
 
   <script>
@@ -118,6 +115,7 @@
         broker: "broker.emqx.io",
         port: 8084,
         path: "/mqtt",
+        // topic: "esp32/FSR402/chair"
         topic: "esp32/sensor/data"
       },
       defaultRoom: 'living',
@@ -153,7 +151,6 @@
       rawPIR: document.getElementById('rawPIR'),
       connDot: document.querySelector('#connStatus .dot'),
       connText: document.querySelector('#connStatus span:last-child'),
-      log: document.getElementById('debugLog'),
       liveSit: document.getElementById('liveSit'),
       lastSit: document.getElementById('lastSit'),
       liveRoom: document.getElementById('liveRoom'),
@@ -172,7 +169,6 @@
         const stored = localStorage.getItem(CONFIG.storageKey);
         if (stored) {
           historyLogs = JSON.parse(stored);
-          debug(`Loaded ${historyLogs.length} records from storage.`);
         }
       } catch (e) {
         console.error("Failed to load history", e);
@@ -186,7 +182,6 @@
         localStorage.setItem(CONFIG.storageKey, JSON.stringify(historyLogs));
         updateRecordCount();
       } catch (e) {
-        debug("Error saving to storage!");
       }
     }
 
@@ -198,13 +193,6 @@
     // Key Function
     // ==========================================
 
-    function debug(msg) {
-      const time = new Date().toLocaleTimeString();
-      const div = document.createElement('div');
-      div.textContent = `[${time}] ${msg}`;
-      els.log.prepend(div);
-      if (els.log.children.length > 50) els.log.lastChild.remove();
-    }
 
     function formatHMS(ms) {
       if (ms < 0) ms = 0;
@@ -226,7 +214,6 @@
       historyLogs.unshift(record); // Add to top
       saveHistory(); // Save to LocalStorage
       renderHistoryTable();
-      debug(`Logged: ${type} (${formatHMS(durationMs)})`);
     }
 
     function renderHistoryTable() {
@@ -272,7 +259,6 @@
         historyLogs = [];
         localStorage.removeItem(CONFIG.storageKey); // Clear from LocalStorage
         renderHistoryTable();
-        debug('History cleared permanently.');
       }
     }
 
@@ -293,7 +279,6 @@
         els.liveSit.textContent = "00:00:00";
         startTimer('sit');
 
-        debug(`Sitting started on ${details.sensor}`);
         renderStatus();
       }
       else if (eventType === 'sit_end') {
@@ -309,46 +294,32 @@
           stopTimer('sit');
 
           state.posture = 'standing';
-          debug(`Stood up. Room timer continues.`);
           renderStatus();
         }
       }
 
       // PIR Toggle
       else if (eventType === 'room_toggle') {
+        const now = Date.now();
+
         if (!state.currentRoom) {
-          // Entering
           state.currentRoom = CONFIG.defaultRoom;
-          roomSession = { start: Date.now(), active: true, roomId: CONFIG.defaultRoom };
-          els.liveRoom.textContent = "00:00:00";
+          roomSession = { start: now, active: true, roomId: CONFIG.defaultRoom };
+          if (els.liveRoom) els.liveRoom.textContent = "00:00:00";
           startTimer('room');
-          debug(`Entered ${state.rooms[CONFIG.defaultRoom]?.name}`);
         } else {
-          // Exiting
-          if (roomSession.active) {
+          if (roomSession.active && roomSession.start) {
             const duration = Date.now() - roomSession.start;
             const roomName = state.rooms[roomSession.roomId]?.name || roomSession.roomId;
+            addHistoryLog('room', `Stayed in ${roomName}`, duration, new Date());
 
-            addHistoryLog('room', `Stayed in ${roomName}`, duration, now);
-
-            els.lastRoom.textContent = formatHMS(duration);
-            els.liveRoom.textContent = "00:00:00";
+            if (els.lastRoom) els.lastRoom.textContent = formatHMS(duration);
+            if (els.liveRoom) els.liveRoom.textContent = "00:00:00";
             stopTimer('room');
-
-            state.currentRoom = null;
-            roomSession.active = false;
-
-            if (state.posture === 'sitting' && sittingSession.active) {
-              const sitDur = Date.now() - sittingSession.start;
-              addHistoryLog('sitting', `Interrupted by Exit`, sitDur, now);
-              sittingSession.active = false;
-              stopTimer('sit');
-              els.lastSit.textContent = formatHMS(sitDur);
-              state.posture = 'standing';
-            }
-
-            debug(`Left ${roomName}. Duration: ${formatHMS(duration)}`);
           }
+
+          state.currentRoom = null;
+          roomSession.active = false;
         }
         renderStatus();
       }
@@ -368,13 +339,16 @@
     // --- Timer ---
     let timers = { sit: null, room: null };
     function startTimer(type) {
-      stopTimer(type);
+      stopTimer(type); // Clear existing interval
       timers[type] = setInterval(() => {
         const start = type === 'sit' ? sittingSession.start : roomSession.start;
         if (!start) return;
+
         const ms = Date.now() - start;
-        if (type === 'sit') els.liveSit.textContent = formatHMS(ms);
-        else els.liveRoom.textContent = formatHMS(ms);
+        const formatted = formatHMS(ms);
+
+        if (type === 'sit' && els.liveSit) els.liveSit.textContent = formatted;
+        if (type === 'room' && els.liveRoom) els.liveRoom.textContent = formatted;
       }, 1000);
     }
     function stopTimer(type) {
@@ -391,7 +365,6 @@
       if (r.errorCode !== 0) {
         els.connDot.className = 'dot red';
         els.connText.textContent = "Lost. Reconnecting...";
-        debug("MQTT Connection Lost");
         setTimeout(() => client.connect({ useSSL: true, onSuccess: onConnect }), 5000);
       }
     };
@@ -402,7 +375,6 @@
       els.connDot.className = 'dot green';
       els.connText.textContent = "Connected";
       client.subscribe(CONFIG.mqtt.topic);
-      debug("Connected to MQTT Broker");
     }
 
     client.connect({
@@ -411,7 +383,6 @@
       onFailure: (m) => {
         els.connDot.className = 'dot red';
         els.connText.textContent = "Connection Failed";
-        debug("MQTT Connect Failed: " + m.errorMessage);
       }
     });
 
@@ -427,10 +398,8 @@
           const wasSitting = lastFsrRaw > CONFIG.fsrThreshold;
 
           if (isSitting && !wasSitting) {
-            debug(`FSR: SITTING (${val})`);
             updateState('sit_start', { sensor: CONFIG.defaultSensor });
           } else if (!isSitting && wasSitting) {
-            debug(`FSR: STANDING (${val})`);
             updateState('sit_end', { sensor: CONFIG.defaultSensor });
           }
           lastFsrRaw = val;
@@ -438,15 +407,23 @@
 
         // PIR logic
         if (data.PIR !== undefined) {
-          els.rawPIR.textContent = data.PIR;
+          if (els.rawPIR) els.rawPIR.textContent = data.PIR;
           const val = parseInt(data.PIR);
           const now = Date.now();
 
+          // Initialize on first message
+          if (lastPirRaw === -1) {
+            lastPirRaw = val;
+            lastPirTriggerTime = now;
+            debug(`PIR initialized to ${val}`);
+            return;
+          }
+
+          // Rising edge detection (0 → 1)
           if (val === 1 && lastPirRaw === 0) {
-            if (now - lastPirTriggerTime < CONFIG.pirDebounceMs) {
-              // Debounce ignore
+            const elapsed = now - lastPirTriggerTime;
+            if (elapsed < CONFIG.pirDebounceMs) {
             } else {
-              debug(`PIR: TOGGLE TRIGGERED`);
               updateState('room_toggle', {});
               lastPirTriggerTime = now;
             }
@@ -455,7 +432,6 @@
         }
 
       } catch (e) {
-        debug("JSON Parse Error");
       }
     }
 

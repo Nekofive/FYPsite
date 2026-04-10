@@ -61,16 +61,15 @@
         </div>
       </section>
       <section class="card">
-        <h2 style="font-size:16px; margin:0 0 12px 0;">Generate Summary</h2>
+        <h2 style="font-size:16px; margin:0 0 12px 0;">Alert board</h2>
         <div style="font-size:13px; color:var(--muted); line-height:1.6;">
-          <p style="margin:0 0 8px 0;">Summary is generated according to the sitting history by Gen AI.</p>
-          <p style="margin:0 0 8px 0;">Note: It is only a reference for helping your dicision making, not acutal
-            actions.</p>
+          <p style="margin:0 0 8px 0;">There will be an alert record on the display dashboard if the sitting time is
+            abnormal.</p>
         </div>
 
         <div style="margin-top:20px;">
-          <h3 style="font-size:13px; color:var(--muted); margin:0 0 8px 0;">Summary</h3>
-          <div id="debugLog" class="log-box">Waiting for AI...</div>
+          <h3 style="font-size:13px; color:var(--muted); margin:0 0 8px 0;">Record</h3>
+          <div id="debugLog" class="log-box"></div>
         </div>
       </section>
     </div>
@@ -107,15 +106,13 @@
   </main>
 
   <script>
-    // ==========================================
     // Config
-    // ==========================================
     const CONFIG = {
       mqtt: {
         broker: "broker.emqx.io",
         port: 8084,
         path: "/mqtt",
-        // topic: "esp32/FSR402/chair"
+        // topic: "esp32/FSR402/chair" allows multi topics but now only one
         topic: "esp32/sensor/data"
       },
       defaultRoom: 'living',
@@ -132,6 +129,12 @@
         living: { name: 'Living Room' },
         bedroom: { name: 'Bedroom' },
         kitchen: { name: 'Kitchen' }
+      },
+      alerts: {
+        sittingAlerted: false,
+        roomAlerted: false,
+        sittingThreshold: 10 * 1000, // testing for 10 seconds
+        roomThreshold: 10 * 1000, // testing for 10 seconds;
       }
     };
 
@@ -160,10 +163,7 @@
       recordCount: document.getElementById('recordCount')
     };
 
-    // ==========================================
     // LocalStorage
-    // ==========================================
-
     function loadHistory() {
       try {
         const stored = localStorage.getItem(CONFIG.storageKey);
@@ -189,11 +189,8 @@
       els.recordCount.textContent = `${historyLogs.length} records`;
     }
 
-    // ==========================================
-    // Key Function
-    // ==========================================
 
-
+    // Key Functions
     function formatHMS(ms) {
       if (ms < 0) ms = 0;
       const s = Math.floor(ms / 1000);
@@ -262,10 +259,7 @@
       }
     }
 
-    // ==========================================
-    // Sensor
-    // ==========================================
-
+    // Sensor and states
     function updateState(eventType, details) {
       const now = new Date();
       els.timeLabel.textContent = now.toLocaleTimeString();
@@ -336,29 +330,114 @@
       els.roomLabel.textContent = state.currentRoom ? state.rooms[state.currentRoom]?.name : 'Outside';
     }
 
+    // Alert System (Duration > 5 minutes)
+    function triggerAlert(type, durationMs) {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString();
+      const durationStr = formatHMS(durationMs);
+
+      let message = '';
+      let alertType = '';
+
+      if (type === 'sitting') {
+        message = `Prolonged Sitting: ${durationStr} - Please check on the user`;
+        alertType = 'sitting_alert';
+      } else if (type === 'room') {
+        message = `Prolonged Room Stay: ${durationStr} in ${state.rooms[roomSession.roomId]?.name || roomSession.roomId}`;
+        alertType = 'room_alert';
+      }
+
+      // Display in debug log
+      const logBox = document.getElementById('debugLog');
+      if (logBox) {
+        const alertEntry = document.createElement('div');
+        alertEntry.style.cssText = 'color:#ff5e57; font-weight:600; margin:4px 0; border-left:3px solid #ff5e57; padding-left:8px;';
+        alertEntry.textContent = `[${timeStr}] ${message}`;
+        logBox.insertBefore(alertEntry, logBox.firstChild);
+        logBox.scrollTop = 0;
+      }
+
+      // Visual pulse effect on timer
+      const timerEl = type === 'sitting' ? document.getElementById('liveSit') : document.getElementById('liveRoom');
+      if (timerEl) {
+        timerEl.style.animation = 'pulse 1s ease-in-out 3';
+        setTimeout(() => {
+          timerEl.style.animation = '';
+        }, 3000);
+      }
+
+      // Add to history log
+      addHistoryLog('alert', message, durationMs, now);
+      console.log(`🚨 ALERT TRIGGERED: ${message}`);
+    }
+
+    function injectAlertStyles() {
+      if (document.getElementById('alert-styles')) return;
+      const style = document.createElement('style');
+      style.id = 'alert-styles';
+      style.textContent = `
+      @keyframes alertPulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+      }
+      .alert-active {
+        animation: alertPulse 1s ease-in-out infinite;
+        color: var(--danger) !important;
+      }
+      `;
+      document.head.appendChild(style);
+    }
+
     // --- Timer ---
     let timers = { sit: null, room: null };
     function startTimer(type) {
-      stopTimer(type); // Clear existing interval
-      timers[type] = setInterval(() => {
-        const start = type === 'sit' ? sittingSession.start : roomSession.start;
-        if (!start) return;
+      stopTimer(type);
 
-        const ms = Date.now() - start;
+      timers[type] = setInterval(() => {
+        const session = type === 'sit' ? sittingSession : roomSession;
+        if (!session.start) return;
+
+        const ms = Date.now() - session.start;
         const formatted = formatHMS(ms);
 
+        // Update display
         if (type === 'sit' && els.liveSit) els.liveSit.textContent = formatted;
         if (type === 'room' && els.liveRoom) els.liveRoom.textContent = formatted;
+
+        // Alert check: Trigger if >threshold and not already alerted
+        if (type === 'sit') {
+          // Check sitting alert
+          if (ms >= state.alerts.sittingThreshold && !state.alerts.sittingAlerted) {
+            triggerAlert('sitting', ms);
+            state.alerts.sittingAlerted = true;
+          }
+        } else if (type === 'room') {
+          // Check room alert
+          if (ms >= state.alerts.roomThreshold && !state.alerts.roomAlerted) {
+            triggerAlert('room', ms);
+            state.alerts.roomAlerted = true;
+          }
+        }
+
       }, 1000);
     }
+
     function stopTimer(type) {
-      if (timers[type]) clearInterval(timers[type]);
+      if (timers[type]) {
+        clearInterval(timers[type]);
+        timers[type] = null;
+      }
+      // Reset alert state
+      if (type === 'sit') {
+        state.alerts.sittingAlerted = false;
+        if (els.liveSit) els.liveSit.classList.remove('alert-active');
+      } else {
+        state.alerts.roomAlerted = false;
+        if (els.liveRoom) els.liveRoom.classList.remove('alert-active');
+      }
     }
 
-    // ==========================================
     // MQTT connection 
-    // ==========================================
-
     const client = new Paho.MQTT.Client(CONFIG.mqtt.broker, Number(CONFIG.mqtt.port), CONFIG.mqtt.path, "web_persistent_" + Math.random());
 
     client.onConnectionLost = (r) => {
@@ -415,7 +494,6 @@
           if (lastPirRaw === -1) {
             lastPirRaw = val;
             lastPirTriggerTime = now;
-            debug(`PIR initialized to ${val}`);
             return;
           }
 
@@ -435,8 +513,9 @@
       }
     }
 
-    // initinalize
+    // initialize
     window.onload = function () {
+      injectAlertStyles();
       loadHistory();
       renderStatus();
     };
